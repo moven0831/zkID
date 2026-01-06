@@ -48,6 +48,8 @@ jobs:
         run: cd wallet-unit-poc/circom && yarn compile:show
 
       - name: Run ecdsa-spartan2 end-to-end flow
+        env:
+          CMAKE_POSITION_INDEPENDENT_CODE: ON
         run: |
           cd wallet-unit-poc/ecdsa-spartan2
           cargo run --release -- prepare setup --input ../circom/inputs/jwt/default.json
