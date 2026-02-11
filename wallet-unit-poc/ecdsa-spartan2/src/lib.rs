@@ -18,12 +18,18 @@ pub mod setup;
 pub mod utils;
 
 // Re-export commonly used types and functions
-pub use circuits::{prepare_circuit::PrepareCircuit, show_circuit::ShowCircuit};
+#[cfg(feature = "jwt-circuit")]
+pub use circuits::prepare_circuit::PrepareCircuit;
+#[cfg(feature = "rsa-circuits")]
+pub use circuits::rsa_verify_circuit::RsaVerifyCircuit;
+#[cfg(feature = "show-circuit")]
+pub use circuits::show_circuit::ShowCircuit;
 pub use paths::PathConfig;
+#[cfg(feature = "jwt-circuit")]
+pub use prover::generate_prepare_witness;
 pub use prover::{
-    generate_prepare_witness, generate_shared_blinds, prove_circuit, prove_circuit_with_pk,
-    reblind, reblind_with_loaded_data, run_circuit, verify_circuit,
-    verify_circuit_with_loaded_data,
+    generate_shared_blinds, prove_circuit, prove_circuit_with_pk, reblind,
+    reblind_with_loaded_data, run_circuit, verify_circuit, verify_circuit_with_loaded_data,
 };
 pub use setup::{
     load_instance, load_proof, load_proving_key, load_shared_blinds, load_verifying_key,

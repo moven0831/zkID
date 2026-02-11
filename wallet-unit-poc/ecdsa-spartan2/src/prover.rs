@@ -1,18 +1,26 @@
-use std::{fs::File, path::Path, time::Instant};
+#[cfg(feature = "jwt-circuit")]
+use std::fs::File;
+use std::{path::Path, time::Instant};
 
+#[cfg(feature = "jwt-circuit")]
+use crate::circuits::prepare_circuit::jwt_witness;
 use crate::{
-    circuits::prepare_circuit::jwt_witness,
-    paths::PathConfig,
     setup::{
         load_instance, load_proof, load_proving_key, load_shared_blinds, load_verifying_key,
         load_witness, save_instance, save_proof, save_shared_blinds, save_witness,
     },
-    utils::{hashmap_to_json_string, parse_jwt_inputs, parse_witness},
     Scalar, E,
 };
+#[cfg(feature = "jwt-circuit")]
+use crate::{
+    paths::PathConfig,
+    utils::{hashmap_to_json_string, parse_jwt_inputs, parse_witness},
+};
 
+#[cfg(feature = "jwt-circuit")]
 use bellpepper_core::SynthesisError;
 use ff::{derive::rand_core::OsRng, Field};
+#[cfg(feature = "jwt-circuit")]
 use serde_json::Value;
 use spartan2::{
     bellpepper::{solver::SatisfyingAssignment, zk_r1cs::SpartanWitness},
@@ -280,6 +288,7 @@ pub fn verify_circuit_with_loaded_data(
 /// # Arguments
 /// * `config` - Path configuration for resolving file paths
 /// * `input_json_path` - Optional override for input JSON path (absolute or relative to config.base_dir)
+#[cfg(feature = "jwt-circuit")]
 pub fn generate_prepare_witness(
     config: &PathConfig,
     input_json_path: Option<&Path>,

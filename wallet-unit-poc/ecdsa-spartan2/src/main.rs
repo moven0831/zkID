@@ -19,21 +19,50 @@
 //! Every proof emitted in this sequence (including the reblinded variants) should verify successfully.
 
 use ecdsa_spartan2::{
-    generate_shared_blinds, load_instance, load_proof, load_shared_blinds, load_witness,
+    load_proof, prove_circuit, prove_circuit_with_pk, run_circuit, save_keys, setup_circuit_keys,
+    setup_circuit_keys_no_save, verify_circuit, verify_circuit_with_loaded_data, PathConfig,
+};
+
+#[cfg(any(feature = "jwt-circuit", feature = "show-circuit"))]
+use ecdsa_spartan2::{
+    generate_shared_blinds, load_instance, load_shared_blinds, load_witness, reblind,
+    reblind_with_loaded_data, E,
+};
+
+#[cfg(feature = "jwt-circuit")]
+use ecdsa_spartan2::{
     paths::keys::{
         PREPARE_INSTANCE, PREPARE_PROOF, PREPARE_PROVING_KEY, PREPARE_VERIFYING_KEY,
-        PREPARE_WITNESS, SHARED_BLINDS, SHOW_INSTANCE, SHOW_PROOF, SHOW_PROVING_KEY,
-        SHOW_VERIFYING_KEY, SHOW_WITNESS,
+        PREPARE_WITNESS, SHARED_BLINDS,
     },
-    prove_circuit, prove_circuit_with_pk, reblind, reblind_with_loaded_data, run_circuit,
-    save_keys, setup_circuit_keys, setup_circuit_keys_no_save, verify_circuit,
-    verify_circuit_with_loaded_data, PathConfig, PrepareCircuit, ShowCircuit, E,
+    PrepareCircuit,
 };
+
+#[cfg(feature = "show-circuit")]
+use ecdsa_spartan2::{
+    paths::keys::{
+        SHOW_INSTANCE, SHOW_PROOF, SHOW_PROVING_KEY, SHOW_VERIFYING_KEY, SHOW_WITNESS,
+    },
+    ShowCircuit,
+};
+
+#[cfg(feature = "rsa-circuits")]
+use ecdsa_spartan2::{
+    paths::keys::{
+        RSA2048_INSTANCE, RSA2048_PROOF, RSA2048_PROVING_KEY, RSA2048_VERIFYING_KEY,
+        RSA2048_WITNESS, RSA4096_INSTANCE, RSA4096_PROOF, RSA4096_PROVING_KEY,
+        RSA4096_VERIFYING_KEY, RSA4096_WITNESS,
+    },
+    RsaVerifyCircuit,
+};
+
+#[cfg(feature = "show-circuit")]
 use ff::Field;
 use std::{env::args, fs, path::PathBuf, process, time::Instant};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+#[cfg(any(feature = "jwt-circuit", feature = "show-circuit"))]
 const NUM_SHARED: usize = 1;
 
 /// Helper function to get file size in bytes
@@ -41,6 +70,17 @@ fn get_file_size(path: &str) -> u64 {
     fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
+fn format_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.2} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+#[cfg(all(feature = "jwt-circuit", feature = "show-circuit"))]
 #[derive(Debug)]
 struct BenchmarkResults {
     prepare_setup_ms: u128,
@@ -63,17 +103,8 @@ struct BenchmarkResults {
     show_witness_bytes: u64,
 }
 
+#[cfg(all(feature = "jwt-circuit", feature = "show-circuit"))]
 impl BenchmarkResults {
-    fn format_size(bytes: u64) -> String {
-        if bytes < 1024 {
-            format!("{} B", bytes)
-        } else if bytes < 1024 * 1024 {
-            format!("{:.2} KB", bytes as f64 / 1024.0)
-        } else {
-            format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
-        }
-    }
-
     fn print_summary(&self) {
         println!("\n╔════════════════════════════════════════════════╗");
         println!("║        BENCHMARK RESULTS SUMMARY               ║");
@@ -121,35 +152,35 @@ impl BenchmarkResults {
         println!("╠════════════════════════════════════════════════╣");
         println!(
             "║ Prepare Proving Key:    {:>12}       ║",
-            Self::format_size(self.prepare_proving_key_bytes)
+            format_size(self.prepare_proving_key_bytes)
         );
         println!(
             "║ Prepare Verifying Key:  {:>12}       ║",
-            Self::format_size(self.prepare_verifying_key_bytes)
+            format_size(self.prepare_verifying_key_bytes)
         );
         println!(
             "║ Show Proving Key:       {:>12}       ║",
-            Self::format_size(self.show_proving_key_bytes)
+            format_size(self.show_proving_key_bytes)
         );
         println!(
             "║ Show Verifying Key:     {:>12}       ║",
-            Self::format_size(self.show_verifying_key_bytes)
+            format_size(self.show_verifying_key_bytes)
         );
         println!(
             "║ Prepare Proof:          {:>12}       ║",
-            Self::format_size(self.prepare_proof_bytes)
+            format_size(self.prepare_proof_bytes)
         );
         println!(
             "║ Show Proof:             {:>12}       ║",
-            Self::format_size(self.show_proof_bytes)
+            format_size(self.show_proof_bytes)
         );
         println!(
             "║ Prepare Witness:        {:>12}       ║",
-            Self::format_size(self.prepare_witness_bytes)
+            format_size(self.prepare_witness_bytes)
         );
         println!(
             "║ Show Witness:           {:>12}       ║",
-            Self::format_size(self.show_witness_bytes)
+            format_size(self.show_witness_bytes)
         );
         println!("╚════════════════════════════════════════════════╝\n");
     }
@@ -157,8 +188,14 @@ impl BenchmarkResults {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CircuitKind {
+    #[cfg(feature = "jwt-circuit")]
     Prepare,
+    #[cfg(feature = "show-circuit")]
     Show,
+    #[cfg(feature = "rsa-circuits")]
+    Rsa2048,
+    #[cfg(feature = "rsa-circuits")]
+    Rsa4096,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,12 +241,19 @@ fn main() {
     };
 
     match command.circuit {
+        #[cfg(feature = "jwt-circuit")]
         CircuitKind::Prepare => execute_prepare(command.action, command.options),
+        #[cfg(feature = "show-circuit")]
         CircuitKind::Show => execute_show(command.action, command.options),
+        #[cfg(feature = "rsa-circuits")]
+        CircuitKind::Rsa2048 => execute_rsa(command.action, command.options, true),
+        #[cfg(feature = "rsa-circuits")]
+        CircuitKind::Rsa4096 => execute_rsa(command.action, command.options, false),
     }
 }
 
 /// Run the complete benchmark pipeline for a given input file
+#[cfg(all(feature = "jwt-circuit", feature = "show-circuit"))]
 fn run_complete_pipeline(input_path: Option<PathBuf>) -> BenchmarkResults {
     let path_config = PathConfig::development();
 
@@ -410,6 +454,7 @@ fn run_complete_pipeline(input_path: Option<PathBuf>) -> BenchmarkResults {
     }
 }
 
+#[cfg(feature = "jwt-circuit")]
 fn execute_prepare(action: CircuitAction, options: CommandOptions) {
     let path_config = PathConfig::development();
 
@@ -471,6 +516,7 @@ fn execute_prepare(action: CircuitAction, options: CommandOptions) {
     }
 }
 
+#[cfg(feature = "show-circuit")]
 fn execute_show(action: CircuitAction, options: CommandOptions) {
     let path_config = PathConfig::development();
 
@@ -534,6 +580,215 @@ fn execute_show(action: CircuitAction, options: CommandOptions) {
     }
 }
 
+#[cfg(feature = "rsa-circuits")]
+fn execute_rsa(action: CircuitAction, options: CommandOptions, is_2048: bool) {
+    let path_config = PathConfig::development();
+
+    let (pk_key, vk_key, proof_key, witness_key, instance_key) = if is_2048 {
+        (
+            RSA2048_PROVING_KEY,
+            RSA2048_VERIFYING_KEY,
+            RSA2048_PROOF,
+            RSA2048_WITNESS,
+            RSA2048_INSTANCE,
+        )
+    } else {
+        (
+            RSA4096_PROVING_KEY,
+            RSA4096_VERIFYING_KEY,
+            RSA4096_PROOF,
+            RSA4096_WITNESS,
+            RSA4096_INSTANCE,
+        )
+    };
+    let label = if is_2048 { "RSA-2048" } else { "RSA-4096" };
+
+    let make_circuit = |pc: PathConfig, inp: Option<PathBuf>| -> RsaVerifyCircuit {
+        if is_2048 {
+            RsaVerifyCircuit::new_2048(pc, inp)
+        } else {
+            RsaVerifyCircuit::new_4096(pc, inp)
+        }
+    };
+
+    match action {
+        CircuitAction::Setup => {
+            info!(input = ?options.input, "Setting up Spartan-2 keys for {} circuit", label);
+            let circuit = make_circuit(path_config.clone(), options.input.clone());
+            setup_circuit_keys(
+                circuit,
+                path_config.key_path(pk_key),
+                path_config.key_path(vk_key),
+            );
+        }
+        CircuitAction::Run => {
+            let circuit = make_circuit(path_config, options.input.clone());
+            info!("Running {} circuit with ZK-Spartan", label);
+            run_circuit(circuit);
+        }
+        CircuitAction::Prove => {
+            let circuit = make_circuit(path_config.clone(), options.input.clone());
+            info!("Proving {} circuit with ZK-Spartan", label);
+            prove_circuit(
+                circuit,
+                path_config.key_path(pk_key),
+                path_config.artifact_path(instance_key),
+                path_config.artifact_path(witness_key),
+                path_config.artifact_path(proof_key),
+            );
+        }
+        CircuitAction::Verify => {
+            info!("Verifying {} proof with ZK-Spartan", label);
+            let public_values = verify_circuit(
+                path_config.artifact_path(proof_key),
+                path_config.key_path(vk_key),
+            );
+            if !public_values.is_empty() {
+                println!(
+                    "{} public values (modulus limbs): {} values",
+                    label,
+                    public_values.len()
+                );
+            }
+        }
+        CircuitAction::Reblind | CircuitAction::GenerateSharedBlinds => {
+            eprintln!(
+                "Error: {} does not support reblind or shared blinds (standalone circuit)",
+                label
+            );
+            process::exit(1);
+        }
+        CircuitAction::Benchmark => {
+            run_rsa_benchmark(options.input, is_2048);
+        }
+    }
+}
+
+#[cfg(feature = "rsa-circuits")]
+fn run_rsa_benchmark(input_path: Option<PathBuf>, is_2048: bool) {
+    let path_config = PathConfig::development();
+
+    let (pk_key, vk_key, proof_key, witness_key, instance_key) = if is_2048 {
+        (
+            RSA2048_PROVING_KEY,
+            RSA2048_VERIFYING_KEY,
+            RSA2048_PROOF,
+            RSA2048_WITNESS,
+            RSA2048_INSTANCE,
+        )
+    } else {
+        (
+            RSA4096_PROVING_KEY,
+            RSA4096_VERIFYING_KEY,
+            RSA4096_PROOF,
+            RSA4096_WITNESS,
+            RSA4096_INSTANCE,
+        )
+    };
+    let label = if is_2048 { "RSA-2048" } else { "RSA-4096" };
+
+    let make_circuit = |pc: PathConfig, inp: Option<PathBuf>| -> RsaVerifyCircuit {
+        if is_2048 {
+            RsaVerifyCircuit::new_2048(pc, inp)
+        } else {
+            RsaVerifyCircuit::new_4096(pc, inp)
+        }
+    };
+
+    println!("\n╔════════════════════════════════════════════════╗");
+    println!(
+        "║   STARTING {} BENCHMARK PIPELINE            ║",
+        label
+    );
+    println!("╚════════════════════════════════════════════════╝\n");
+
+    // Step 1: Setup
+    info!("Step 1/3: Setting up {} circuit...", label);
+    let circuit = make_circuit(path_config.clone(), input_path.clone());
+    let t0 = Instant::now();
+    let (pk, vk) = setup_circuit_keys_no_save(circuit);
+    let setup_ms = t0.elapsed().as_millis();
+    println!("✓ {} setup completed: {} ms\n", label, setup_ms);
+
+    if let Err(e) = save_keys(
+        path_config.key_path(pk_key),
+        path_config.key_path(vk_key),
+        &pk,
+        &vk,
+    ) {
+        eprintln!("Failed to save {} keys: {}", label, e);
+        std::process::exit(1);
+    }
+
+    // Step 2: Prove
+    info!("Step 2/3: Proving {} circuit...", label);
+    let circuit = make_circuit(path_config.clone(), input_path.clone());
+    let t0 = Instant::now();
+    prove_circuit_with_pk(
+        circuit,
+        &pk,
+        path_config.artifact_path(instance_key),
+        path_config.artifact_path(witness_key),
+        path_config.artifact_path(proof_key),
+    );
+    let prove_ms = t0.elapsed().as_millis();
+    println!("✓ {} proof generated: {} ms\n", label, prove_ms);
+
+    // Step 3: Verify
+    info!("Step 3/3: Verifying {} proof...", label);
+    let proof = load_proof(path_config.artifact_path(proof_key)).expect("load proof failed");
+    let t0 = Instant::now();
+    let public_values = verify_circuit_with_loaded_data(&proof, &vk);
+    let verify_ms = t0.elapsed().as_millis();
+    println!("✓ {} proof verified: {} ms", label, verify_ms);
+    if !public_values.is_empty() {
+        println!(
+            "  Public values (modulus limbs): {} values\n",
+            public_values.len()
+        );
+    }
+
+    // Measure artifact sizes
+    info!("Measuring artifact sizes...");
+    let proving_key_bytes = get_file_size(&path_config.key_path(pk_key).to_string_lossy());
+    let verifying_key_bytes = get_file_size(&path_config.key_path(vk_key).to_string_lossy());
+    let proof_bytes = get_file_size(&path_config.artifact_path(proof_key).to_string_lossy());
+    let witness_bytes = get_file_size(&path_config.artifact_path(witness_key).to_string_lossy());
+
+    // Print summary
+    println!("\n╔════════════════════════════════════════════════╗");
+    println!(
+        "║     {} BENCHMARK RESULTS                    ║",
+        label
+    );
+    println!("╠════════════════════════════════════════════════╣");
+    println!("║ TIMING MEASUREMENTS                            ║");
+    println!("╠════════════════════════════════════════════════╣");
+    println!("║ Setup:                  {:>10} ms      ║", setup_ms);
+    println!("║ Prove:                  {:>10} ms      ║", prove_ms);
+    println!("║ Verify:                 {:>10} ms      ║", verify_ms);
+    println!("╠════════════════════════════════════════════════╣");
+    println!("║ SIZE MEASUREMENTS                              ║");
+    println!("╠════════════════════════════════════════════════╣");
+    println!(
+        "║ Proving Key:            {:>12}       ║",
+        format_size(proving_key_bytes)
+    );
+    println!(
+        "║ Verifying Key:          {:>12}       ║",
+        format_size(verifying_key_bytes)
+    );
+    println!(
+        "║ Proof:                  {:>12}       ║",
+        format_size(proof_bytes)
+    );
+    println!(
+        "║ Witness:                {:>12}       ║",
+        format_size(witness_bytes)
+    );
+    println!("╚════════════════════════════════════════════════╝\n");
+}
+
 fn parse_command(args: &[String]) -> Result<ParsedCommand, String> {
     if args.is_empty() {
         return Err("No command provided".into());
@@ -544,53 +799,69 @@ fn parse_command(args: &[String]) -> Result<ParsedCommand, String> {
             print_usage();
             process::exit(0);
         }
+        #[cfg(feature = "jwt-circuit")]
         "prepare" => parse_circuit_command(CircuitKind::Prepare, &args[1..]),
+        #[cfg(feature = "show-circuit")]
         "show" => parse_circuit_command(CircuitKind::Show, &args[1..]),
+        #[cfg(feature = "rsa-circuits")]
+        "rsa2048" => parse_circuit_command(CircuitKind::Rsa2048, &args[1..]),
+        #[cfg(feature = "rsa-circuits")]
+        "rsa4096" => parse_circuit_command(CircuitKind::Rsa4096, &args[1..]),
+        #[cfg(all(feature = "jwt-circuit", feature = "show-circuit"))]
         "benchmark" => Ok(ParsedCommand {
             circuit: CircuitKind::Prepare, // Benchmark runs both circuits, but we need to pick one for the enum
             action: CircuitAction::Benchmark,
             options: parse_options(&args[1..])?,
         }),
+        #[cfg(feature = "jwt-circuit")]
         "setup_prepare" => Ok(ParsedCommand {
             circuit: CircuitKind::Prepare,
             action: CircuitAction::Setup,
             options: parse_options(&args[1..])?,
         }),
+        #[cfg(feature = "show-circuit")]
         "setup_show" => Ok(ParsedCommand {
             circuit: CircuitKind::Show,
             action: CircuitAction::Setup,
             options: parse_options(&args[1..])?,
         }),
+        #[cfg(feature = "jwt-circuit")]
         "prove_prepare" => Ok(ParsedCommand {
             circuit: CircuitKind::Prepare,
             action: CircuitAction::Prove,
             options: parse_options(&args[1..])?,
         }),
+        #[cfg(feature = "show-circuit")]
         "prove_show" => Ok(ParsedCommand {
             circuit: CircuitKind::Show,
             action: CircuitAction::Prove,
             options: parse_options(&args[1..])?,
         }),
+        #[cfg(feature = "jwt-circuit")]
         "verify_prepare" => Ok(ParsedCommand {
             circuit: CircuitKind::Prepare,
             action: CircuitAction::Verify,
             options: ensure_no_options(&args[1..])?,
         }),
+        #[cfg(feature = "show-circuit")]
         "verify_show" => Ok(ParsedCommand {
             circuit: CircuitKind::Show,
             action: CircuitAction::Verify,
             options: ensure_no_options(&args[1..])?,
         }),
+        #[cfg(feature = "jwt-circuit")]
         "reblind_prepare" => Ok(ParsedCommand {
             circuit: CircuitKind::Prepare,
             action: CircuitAction::Reblind,
             options: ensure_no_options(&args[1..])?,
         }),
+        #[cfg(feature = "show-circuit")]
         "reblind_show" => Ok(ParsedCommand {
             circuit: CircuitKind::Show,
             action: CircuitAction::Reblind,
             options: ensure_no_options(&args[1..])?,
         }),
+        #[cfg(feature = "jwt-circuit")]
         "generate_shared_blinds" => Ok(ParsedCommand {
             circuit: CircuitKind::Prepare,
             action: CircuitAction::GenerateSharedBlinds,
@@ -627,10 +898,18 @@ fn parse_circuit_command(circuit: CircuitKind, tail: &[String]) -> Result<Parsed
         }
     };
 
+    #[cfg(feature = "jwt-circuit")]
     if action == CircuitAction::GenerateSharedBlinds && circuit != CircuitKind::Prepare {
         return Err(
             "The generate_shared_blinds action is only supported for the Prepare circuit".into(),
         );
+    }
+
+    #[cfg(feature = "rsa-circuits")]
+    if action == CircuitAction::Reblind
+        && (circuit == CircuitKind::Rsa2048 || circuit == CircuitKind::Rsa4096)
+    {
+        return Err("RSA circuits do not support reblind (standalone circuit)".into());
     }
 
     let options_slice = &tail[option_start..];
@@ -691,20 +970,22 @@ fn parse_options(args: &[String]) -> Result<CommandOptions, String> {
 fn print_usage() {
     eprintln!(
         "Usage:
-  ecdsa-spartan2 <prepare|show> [run|setup|prove|verify] [options]
+  ecdsa-spartan2 <prepare|show|rsa2048|rsa4096> [run|setup|prove|verify] [options]
   ecdsa-spartan2 benchmark [options]
 
 Commands:
   benchmark            Run complete pipeline with full metrics (setup, prove, reblind, verify)
   prepare <action>     Run action on Prepare circuit
   show <action>        Run action on Show circuit
+  rsa2048 <action>     Run action on RSA-2048 verify circuit
+  rsa4096 <action>     Run action on RSA-4096 verify circuit
 
 Actions:
   run                  Run the complete circuit (setup, prove, verify)
   setup                Generate proving and verifying keys
   prove                Generate proof
   verify               Verify proof
-  reblind              Reblind proof
+  reblind              Reblind proof (prepare/show only)
   benchmark            Run complete benchmark pipeline
 
 Options:
@@ -715,6 +996,8 @@ Examples:
   cargo run --release -- prepare run --input ../circom/inputs/jwt/generated.json
   cargo run --release -- show prove --input ../circom/inputs/show/generated.json
   cargo run --release -- show verify
+  cargo run --release -- rsa2048 benchmark --input ../circom/inputs/rsa_verify_2048/default.json
+  cargo run --release -- rsa4096 benchmark --input ../circom/inputs/rsa_verify_4096/default.json
 
 Legacy commands like `prepare`, `show`, `prove_prepare`, etc. are still supported."
     );

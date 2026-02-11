@@ -143,6 +143,18 @@ pub mod keys {
     pub const SHOW_WITNESS: &str = "show_witness.bin";
     pub const SHOW_INSTANCE: &str = "show_instance.bin";
     pub const SHARED_BLINDS: &str = "shared_blinds.bin";
+
+    pub const RSA2048_PROVING_KEY: &str = "rsa2048_proving.key";
+    pub const RSA2048_VERIFYING_KEY: &str = "rsa2048_verifying.key";
+    pub const RSA2048_PROOF: &str = "rsa2048_proof.bin";
+    pub const RSA2048_WITNESS: &str = "rsa2048_witness.bin";
+    pub const RSA2048_INSTANCE: &str = "rsa2048_instance.bin";
+
+    pub const RSA4096_PROVING_KEY: &str = "rsa4096_proving.key";
+    pub const RSA4096_VERIFYING_KEY: &str = "rsa4096_verifying.key";
+    pub const RSA4096_PROOF: &str = "rsa4096_proof.bin";
+    pub const RSA4096_WITNESS: &str = "rsa4096_witness.bin";
+    pub const RSA4096_INSTANCE: &str = "rsa4096_instance.bin";
 }
 
 #[cfg(test)]
