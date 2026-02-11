@@ -5,39 +5,54 @@
 Compile the circom circuits with secq256r1 as native field:
 
 ```sh
+cd circom
 yarn
-yarn compile:jwt
-yarn compile:ecdsa
+yarn compile:jwt        # Prepare (JWT) circuit
+yarn compile:show       # Show circuit
+yarn compile:rsa2048    # RSA-2048 verify circuit (optional)
+yarn compile:rsa4096    # RSA-4096 verify circuit (optional)
+yarn compile:all        # all circuits
 ```
 
 This creates a build folder containing R1CS and WASM files for circuits.
 
-### Step 2: Setup Keys for Circuits
+### Step 2: JWT + Show Circuits (default)
 
-Setup keys for ECDSA circuit:
+All commands run from `ecdsa-spartan2/`. Set `RUST_LOG=info` for timing output.
 
 ```sh
-RUST_LOG=info cargo run --release -- setup_ecdsa
+cd ecdsa-spartan2
+
+# Setup keys (run once per circuit change)
+cargo run --release -- prepare setup --input ../circom/inputs/jwt/default.json
+cargo run --release -- show setup --input ../circom/inputs/show/default.json
+
+# Generate shared blinding factors (run before proving)
+cargo run --release -- generate_shared_blinds
+
+# Prove → Reblind → Verify
+cargo run --release -- prepare prove --input ../circom/inputs/jwt/default.json
+cargo run --release -- prepare reblind
+cargo run --release -- show prove --input ../circom/inputs/show/default.json
+cargo run --release -- show reblind
+cargo run --release -- prepare verify
+cargo run --release -- show verify
 ```
 
-Setup keys for JWT circuit:
+### Step 3: RSA Circuits (optional, requires `--features rsa-circuits`)
 
 ```sh
-RUST_LOG=info cargo run --release -- setup_jwt
-```
+# Setup
+cargo run --release --features rsa-circuits -- rsa2048 setup --input ../circom/inputs/rsa_verify_2048/default.json
+cargo run --release --features rsa-circuits -- rsa4096 setup --input ../circom/inputs/rsa_verify_4096/default.json
 
-### Step 3: Run Circuits
+# Prove
+cargo run --release --features rsa-circuits -- rsa2048 prove --input ../circom/inputs/rsa_verify_2048/default.json
+cargo run --release --features rsa-circuits -- rsa4096 prove --input ../circom/inputs/rsa_verify_4096/default.json
 
-Run ECDSA circuit:
-
-```sh
-RUST_LOG=info cargo run --release -- prove_ecdsa
-```
-
-Run JWT circuit:
-
-```sh
-RUST_LOG=info cargo run --release -- prove_jwt
+# Verify
+cargo run --release --features rsa-circuits -- rsa2048 verify
+cargo run --release --features rsa-circuits -- rsa4096 verify
 ```
 
 ## Benchmarks
