@@ -13,10 +13,13 @@
     "compile:jwt": "bash scripts/compile.sh jwt",
     "compile:show": "bash scripts/compile.sh show",
     "compile:ecdsa": "bash scripts/compile.sh ecdsa",
+    "compile:rsa2048": "bash scripts/compile.sh rsa2048",
+    "compile:rsa4096": "bash scripts/compile.sh rsa4096",
     "compile:all": "bash scripts/compile.sh all",
     "setup": "npx circomkit setup jwt",
     "prove": "npx circomkit prove jwt",
-    "verify": "npx circomkit verify jwt"
+    "verify": "npx circomkit verify jwt",
+    "generate:rsa": "npx ts-node src/generate_rsa_inputs.ts"
   },
   "dependencies": {
     "@aws-crypto/sha256-js": "^5.2.0",

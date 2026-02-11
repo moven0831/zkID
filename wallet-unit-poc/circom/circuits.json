@@ -14,5 +14,17 @@
     "file": "ecdsa/ecdsa",
     "template": "ECDSA",
     "params": []
+  },
+  "rsa_verify_2048": {
+    "file": "rsa_verify",
+    "template": "RSAVerify",
+    "params": [64, 121, 17],
+    "pubs": ["modulus"]
+  },
+  "rsa_verify_4096": {
+    "file": "rsa_verify",
+    "template": "RSAVerify",
+    "params": [64, 121, 34],
+    "pubs": ["modulus"]
   }
 }
