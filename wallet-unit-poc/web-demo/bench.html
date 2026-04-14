@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>zkID bench — worker vs main</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+      body {
+        font-family: ui-monospace, monospace;
+        padding: 16px;
+        background: #fafafa;
+        color: #111;
+      }
+      h1 {
+        font-size: 16px;
+        margin: 0 0 8px;
+      }
+      .status {
+        padding: 8px 12px;
+        border: 1px solid #ccc;
+        background: #fff;
+        margin-bottom: 12px;
+      }
+      pre {
+        background: #fff;
+        border: 1px solid #ccc;
+        padding: 12px;
+        overflow: auto;
+        font-size: 12px;
+        white-space: pre;
+      }
+      #results {
+        margin-top: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>zkID pipeline benchmark</h1>
+    <div class="status" id="status">Loading...</div>
+    <pre id="results"></pre>
+    <script type="module" src="/src/bench.ts"></script>
+  </body>
+</html>

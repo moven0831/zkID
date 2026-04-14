@@ -164,6 +164,9 @@ function createKeySet(
 
 // Re-exports
 export { Credential } from "./credential.js";
+export { WorkerBridge } from "./worker-bridge.js";
+export type { WorkerBridgeConfig } from "./worker-bridge.js";
+export type { VcSize, SetupKeys } from "./wasm-bridge.js";
 export { Prover, deserializePrecomputed } from "./prover.js";
 export { Verifier } from "./verifier.js";
 export { WitnessCalculator } from "./witness-calculator.js";

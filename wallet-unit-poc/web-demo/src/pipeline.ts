@@ -17,7 +17,14 @@ import { sha256 } from "@noble/hashes/sha2";
 // Import browser-safe SDK source files directly (avoids NativeBackend / fs deps)
 import { Credential } from "../../openac-sdk/src/credential.js";
 import { WasmBridge } from "../../openac-sdk/src/wasm-bridge.js";
-import type { VcSize } from "../../openac-sdk/src/wasm-bridge.js";
+import type {
+  VcSize,
+  SetupKeys,
+  PrecomputeState,
+  PresentationProof as WasmPresentationProof,
+  VerificationResult as WasmVerificationResult,
+} from "../../openac-sdk/src/wasm-bridge.js";
+import { WorkerBridge } from "../../openac-sdk/src/worker-bridge.js";
 import { buildJwtCircuitInputs } from "../../openac-sdk/src/inputs/jwt-input-builder.js";
 import {
   buildShowCircuitInputs,
@@ -189,17 +196,63 @@ const DEVICE_PUBLIC_KEY = {
 const VERIFIER_NONCE = "test-nonce-12345";
 
 // ---------------------------------------------------------------------------
+// Proving backend abstraction
+// ---------------------------------------------------------------------------
+//
+// Two backends implement this interface:
+//   - MainThreadBackend: the original WasmBridge + BrowserWitnessCalculator,
+//     both running on the main thread. Blocks the UI during proving.
+//   - WorkerBackend: WorkerBridge, which offloads every WASM call (Spartan2
+//     proving + Circom witness calc) to a dedicated Web Worker.
+//
+// The worker backend is the default. Add `?mode=main` to the URL to force the
+// original main-thread backend (useful for A/B benchmarking).
+
+export type ProvingMode = "worker" | "main";
+
+interface ProvingBackend {
+  mode: ProvingMode;
+  loadKeys(baseUrl: string, vcSize: VcSize): Promise<SetupKeys>;
+  calculateJwtWitnessWtns(inputs: Record<string, unknown>): Promise<Uint8Array>;
+  calculateShowWitnessWtns(inputs: Record<string, unknown>): Promise<Uint8Array>;
+  calculateJwtWitnessBigInts(inputs: Record<string, unknown>): Promise<bigint[]>;
+  calculateShowWitnessBigInts(inputs: Record<string, unknown>): Promise<bigint[]>;
+  precomputeFromWitness(pk: Uint8Array, wtns: Uint8Array): Promise<PrecomputeState>;
+  precomputeShowFromWitness(pk: Uint8Array, wtns: Uint8Array): Promise<PrecomputeState>;
+  present(
+    preparePk: Uint8Array,
+    prepareInstance: Uint8Array,
+    prepareWitness: Uint8Array,
+    showPk: Uint8Array,
+    showInstance: Uint8Array,
+    showWitness: Uint8Array,
+  ): Promise<WasmPresentationProof>;
+  verify(
+    prepareProof: Uint8Array,
+    prepareVk: Uint8Array,
+    prepareInstance: Uint8Array,
+    showProof: Uint8Array,
+    showVk: Uint8Array,
+    showInstance: Uint8Array,
+  ): Promise<WasmVerificationResult>;
+}
+
+function getProvingModeFromUrl(): ProvingMode {
+  if (typeof window === "undefined") return "worker";
+  const params = new URLSearchParams(window.location.search);
+  return params.get("mode") === "main" ? "main" : "worker";
+}
+
+export function getProvingMode(): ProvingMode {
+  return backend?.mode ?? getProvingModeFromUrl();
+}
+
+// ---------------------------------------------------------------------------
 // Pipeline state (singleton)
 // ---------------------------------------------------------------------------
 
-let bridge: WasmBridge | null = null;
-let witnessCalc: BrowserWitnessCalculator | null = null;
-let keys: {
-  preparePk: Uint8Array;
-  prepareVk: Uint8Array;
-  showPk: Uint8Array;
-  showVk: Uint8Array;
-} | null = null;
+let backend: ProvingBackend | null = null;
+let keys: SetupKeys | null = null;
 
 // State carried between steps
 let currentTestData: GenerateResult | null = null;
@@ -216,37 +269,120 @@ export async function initWasm(
   onProgress?: ProgressCallback
 ): Promise<StepLog[]> {
   const logs: StepLog[] = [];
+  const mode = getProvingModeFromUrl();
 
-  // 1. Load WASM module
-  //    JS glue is bundled from src/wasm/, binary is served from public/
-  onProgress?.("Loading WASM module...");
-  let t = performance.now();
-  const wasmModule = await import("./wasm/openac_wasm.js");
-  const wasmResp = await fetch("/openac_wasm_bg.wasm");
-  const wasmBytes = await wasmResp.arrayBuffer();
-  wasmModule.initSync({ module: new WebAssembly.Module(wasmBytes) });
+  // 1. Initialize proving backend
+  //    Worker mode: spawn a dedicated Web Worker that hosts both Spartan2
+  //    WASM and the Circom witness calculator. Main-thread mode: load both
+  //    directly in the current thread (legacy path, kept for benchmark A/B).
+  if (mode === "worker") {
+    onProgress?.("Spawning proving worker...");
+    const t = performance.now();
+    backend = await createWorkerBackend();
+    logs.push({
+      label: "Spawn worker + load WASM",
+      durationMs: performance.now() - t,
+    });
+  } else {
+    onProgress?.("Loading WASM module (main thread)...");
+    let t = performance.now();
+    const wasmModule = await import("./wasm/openac_wasm.js");
+    const wasmResp = await fetch("/openac_wasm_bg.wasm");
+    const wasmBytes = await wasmResp.arrayBuffer();
+    wasmModule.initSync({ module: new WebAssembly.Module(wasmBytes) });
+    const bridge = new WasmBridge();
+    bridge.initWithModule(wasmModule);
+    logs.push({ label: "Load WASM module", durationMs: performance.now() - t });
 
-  bridge = new WasmBridge();
-  bridge.initWithModule(wasmModule);
-  logs.push({ label: "Load WASM module", durationMs: performance.now() - t });
+    onProgress?.("Initializing witness calculator...");
+    t = performance.now();
+    const witnessCalc = new BrowserWitnessCalculator();
+    logs.push({
+      label: "Init witness calculator",
+      durationMs: performance.now() - t,
+    });
 
-  // 2. Initialize witness calculator
-  onProgress?.("Initializing witness calculator...");
-  t = performance.now();
-  witnessCalc = new BrowserWitnessCalculator();
+    backend = createMainThreadBackend(bridge, witnessCalc);
+  }
+
+  // 2. Load proving/verifying keys (1k variant)
+  onProgress?.("Loading proving/verifying keys (1k)...");
+  const tKeys = performance.now();
+  const vcSize: VcSize = "1k";
+  keys = await backend.loadKeys("/keys", vcSize);
   logs.push({
-    label: "Init witness calculator",
-    durationMs: performance.now() - t,
+    label: "Load keys (1k)",
+    durationMs: performance.now() - tKeys,
   });
 
-  // 3. Load keys
-  onProgress?.("Loading proving/verifying keys (1k)...");
-  t = performance.now();
-  const vcSize: VcSize = "1k";
-  keys = await bridge.loadKeys("/keys", vcSize);
-  logs.push({ label: "Load keys (1k)", durationMs: performance.now() - t });
-
   return logs;
+}
+
+async function createWorkerBackend(): Promise<ProvingBackend> {
+  // Asset URLs are resolved relative to the pipeline module so the worker
+  // (which lives in openac-sdk/src/) can fetch them without hardcoding paths.
+  const spartanWasmJsUrl = new URL("./wasm/openac_wasm.js", import.meta.url)
+    .href;
+  const witnessCalculatorUrl = new URL(
+    "./assets/witness_calculator.js",
+    import.meta.url,
+  ).href;
+  const worker = new WorkerBridge({
+    spartanWasmJsUrl,
+    spartanWasmBinUrl: "/openac_wasm_bg.wasm",
+    witnessCalculatorUrl,
+    jwtCircomWasmUrl: "/jwt.wasm",
+    showCircomWasmUrl: "/show.wasm",
+  });
+  await worker.init();
+  return {
+    mode: "worker",
+    loadKeys: (baseUrl, vcSize) => worker.loadKeys(baseUrl, vcSize),
+    calculateJwtWitnessWtns: (inputs) => worker.calculateJwtWitnessWtns(inputs),
+    calculateShowWitnessWtns: (inputs) =>
+      worker.calculateShowWitnessWtns(inputs),
+    calculateJwtWitnessBigInts: (inputs) =>
+      worker.calculateJwtWitnessBigInts(inputs),
+    calculateShowWitnessBigInts: (inputs) =>
+      worker.calculateShowWitnessBigInts(inputs),
+    precomputeFromWitness: (pk, wtns) => worker.precomputeFromWitness(pk, wtns),
+    precomputeShowFromWitness: (pk, wtns) =>
+      worker.precomputeShowFromWitness(pk, wtns),
+    present: (...args) => worker.present(...args),
+    verify: (...args) => worker.verify(...args),
+  };
+}
+
+function createMainThreadBackend(
+  bridge: WasmBridge,
+  witnessCalc: BrowserWitnessCalculator,
+): ProvingBackend {
+  // Normalize inputs through a JSON round-trip (BigInt → string → BigInt)
+  // so nested objects, arrays, and Uint8Array values are reshaped into the
+  // plain-JS structure the witness calculator expects. The worker backend
+  // does the same normalization inside the worker.
+  const normalize = (inputs: Record<string, unknown>): Record<string, unknown> =>
+    JSON.parse(circuitInputsToJson(inputs), (_key, value) => {
+      if (typeof value === "string" && /^-?\d+$/.test(value)) return BigInt(value);
+      return value;
+    }) as Record<string, unknown>;
+  return {
+    mode: "main",
+    loadKeys: (baseUrl, vcSize) => bridge.loadKeys(baseUrl, vcSize),
+    calculateJwtWitnessWtns: (inputs) =>
+      witnessCalc.calculateJwtWitnessWtns(normalize(inputs)),
+    calculateShowWitnessWtns: (inputs) =>
+      witnessCalc.calculateShowWitnessWtns(normalize(inputs)),
+    calculateJwtWitnessBigInts: (inputs) =>
+      witnessCalc.calculateJwtWitness(normalize(inputs)),
+    calculateShowWitnessBigInts: (inputs) =>
+      witnessCalc.calculateShowWitness(normalize(inputs)),
+    precomputeFromWitness: (pk, wtns) => bridge.precomputeFromWitness(pk, wtns),
+    precomputeShowFromWitness: (pk, wtns) =>
+      bridge.precomputeShowFromWitness(pk, wtns),
+    present: (...args) => bridge.present(...args),
+    verify: (...args) => bridge.verify(...args),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -320,8 +456,7 @@ export async function precompute(
   onProgress?: ProgressCallback
 ): Promise<PrecomputeResult> {
   if (!currentTestData) throw new Error("Run Step 1 first");
-  if (!bridge) throw new Error("WASM not initialized");
-  if (!witnessCalc) throw new Error("Witness calculator not initialized");
+  if (!backend) throw new Error("Proving backend not initialized");
   if (!keys) throw new Error("Keys not loaded");
 
   const data = currentTestData;
@@ -357,15 +492,13 @@ export async function precompute(
   });
 
   // Calculate JWT witness (Circom WASM)
+  // In worker mode the backend serializes+reparses internally, so we pass the
+  // inputs object directly either way.
   onProgress?.("Calculating JWT witness (circom WASM)...");
   t = performance.now();
-  const jwtInputsJson = circuitInputsToJson(jwtInputs);
-  const jwtInputsParsed = JSON.parse(jwtInputsJson, (_key, value) => {
-    if (typeof value === "string" && /^-?\d+$/.test(value)) return BigInt(value);
-    return value;
-  });
-  const jwtWitnessWtns = await witnessCalc.calculateJwtWitnessWtns(jwtInputsParsed);
-  const jwtWitness = await witnessCalc.calculateJwtWitness(jwtInputsParsed);
+  const jwtInputsRec = jwtInputs as unknown as Record<string, unknown>;
+  const jwtWitnessWtns = await backend.calculateJwtWitnessWtns(jwtInputsRec);
+  const jwtWitness = await backend.calculateJwtWitnessBigInts(jwtInputsRec);
   logs.push({
     label: "Calculate JWT witness",
     durationMs: performance.now() - t,
@@ -374,7 +507,7 @@ export async function precompute(
   // Prove Prepare circuit (Spartan2 WASM)
   onProgress?.("Proving Prepare circuit (Spartan2 WASM)...");
   t = performance.now();
-  const prepareResult = await bridge.precomputeFromWitness(
+  const prepareResult = await backend.precomputeFromWitness(
     keys.preparePk,
     jwtWitnessWtns
   );
@@ -407,8 +540,7 @@ export async function present(
 ): Promise<PresentResult> {
   if (!currentTestData) throw new Error("Run Step 1 first");
   if (!currentPrecompute) throw new Error("Run Step 2 first");
-  if (!bridge) throw new Error("WASM not initialized");
-  if (!witnessCalc) throw new Error("Witness calculator not initialized");
+  if (!backend) throw new Error("Proving backend not initialized");
   if (!keys) throw new Error("Keys not loaded");
 
   const data = currentTestData;
@@ -448,13 +580,9 @@ export async function present(
   // Calculate Show witness (Circom WASM)
   onProgress?.("Calculating Show witness (circom WASM)...");
   t = performance.now();
-  const showInputsJson = circuitInputsToJson(showInputs);
-  const showInputsParsed = JSON.parse(showInputsJson, (_key, value) => {
-    if (typeof value === "string" && /^-?\d+$/.test(value)) return BigInt(value);
-    return value;
-  });
-  const showWitnessWtns = await witnessCalc.calculateShowWitnessWtns(showInputsParsed);
-  const showWitness = await witnessCalc.calculateShowWitness(showInputsParsed);
+  const showInputsRec = showInputs as unknown as Record<string, unknown>;
+  const showWitnessWtns = await backend.calculateShowWitnessWtns(showInputsRec);
+  const showWitness = await backend.calculateShowWitnessBigInts(showInputsRec);
   logs.push({
     label: "Calculate Show witness",
     durationMs: performance.now() - t,
@@ -463,7 +591,7 @@ export async function present(
   // Prove Show circuit (Spartan2 WASM)
   onProgress?.("Proving Show circuit (Spartan2 WASM)...");
   t = performance.now();
-  const showResult = await bridge.precomputeShowFromWitness(
+  const showResult = await backend.precomputeShowFromWitness(
     keys.showPk,
     showWitnessWtns
   );
@@ -475,7 +603,7 @@ export async function present(
   // Reblind both proofs with shared randomness (present)
   onProgress?.("Reblinding proofs (shared randomness)...");
   t = performance.now();
-  const presentResult = await bridge.present(
+  const presentResult = await backend.present(
     keys.preparePk,
     precomp.prepareInstance,
     precomp.prepareWitness,
@@ -523,7 +651,7 @@ export async function verify(
   onProgress?: ProgressCallback
 ): Promise<VerifyResult> {
   if (!currentPresent) throw new Error("Run Step 3 first");
-  if (!bridge) throw new Error("WASM not initialized");
+  if (!backend) throw new Error("Proving backend not initialized");
   if (!keys) throw new Error("Keys not loaded");
 
   const pres = currentPresent;
@@ -532,7 +660,7 @@ export async function verify(
 
   onProgress?.("Verifying both proofs + shared commitment...");
   const t = performance.now();
-  const verifyResult = await bridge.verify(
+  const verifyResult = await backend.verify(
     pres.prepareProof,
     keys.prepareVk,
     pres.prepareInstance,

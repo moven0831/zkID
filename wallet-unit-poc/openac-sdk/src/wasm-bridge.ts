@@ -116,7 +116,13 @@ export class WasmBridge {
       this.wasm = module as OpenACWasmModule;
     } else {
       try {
-        const module = await import("../wasm/pkg/openac_wasm.js");
+        // Computed path (not a string literal) so Vite's import-analysis
+        // doesn't try to statically resolve `../wasm/pkg/` — that directory
+        // only exists after running scripts/build-wasm.sh. Browsers that
+        // never hit this branch (e.g., web-demo passes an explicit module)
+        // therefore don't pay the price of the pkg/ build.
+        const pkgPath = "../wasm/pkg/openac_wasm.js";
+        const module = await import(/* @vite-ignore */ pkgPath);
         this.wasm = module as OpenACWasmModule;
       } catch {
         throw new WasmError(

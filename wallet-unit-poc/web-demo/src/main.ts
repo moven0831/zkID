@@ -8,6 +8,7 @@ import {
   formatBytes,
   getDevicePublicKeyDisplay,
   getIssuerPublicKeyDisplay,
+  getProvingMode,
   type StepLog,
 } from "./pipeline.js";
 
@@ -158,6 +159,33 @@ function showResultBanner(
   $("result-details").innerHTML = detailsHtml;
 }
 
+function renderModeBadge(mode: "worker" | "main"): void {
+  const existing = document.getElementById("mode-badge");
+  if (existing) existing.remove();
+  const badge = document.createElement("div");
+  badge.id = "mode-badge";
+  badge.textContent =
+    mode === "worker" ? "mode: web worker" : "mode: main thread";
+  badge.title =
+    mode === "worker"
+      ? "Proving runs in a dedicated Web Worker so the UI stays responsive. Add ?mode=main to the URL to use the main-thread path."
+      : "Proving runs on the main thread (UI will freeze during proving). Remove ?mode=main from the URL to use the worker.";
+  badge.style.cssText = [
+    "position: fixed",
+    "top: 8px",
+    "right: 8px",
+    "padding: 4px 10px",
+    "font-size: 11px",
+    "font-family: ui-monospace, monospace",
+    "background: " + (mode === "worker" ? "#e6f9ed" : "#fff4d6"),
+    "color: " + (mode === "worker" ? "#0a6b33" : "#7a5500"),
+    "border: 1px solid " + (mode === "worker" ? "#34c77b" : "#e6b800"),
+    "border-radius: 4px",
+    "z-index: 9999",
+  ].join(";");
+  document.body.appendChild(badge);
+}
+
 function truncateHex(hex: string): string {
   const cleaned = hex.replace(/^0x/, "").replace(/[^0-9a-fA-F]/g, "");
   if (cleaned.length <= 20) return cleaned;
@@ -187,7 +215,12 @@ async function init() {
       .map((l) => `<div>&#10003; ${l.label} — ${formatMs(l.durationMs)}</div>`)
       .join("");
 
-    $("init-status").textContent = "Ready!";
+    const mode = getProvingMode();
+    const modeLabel = mode === "worker"
+      ? "Web Worker (off-main-thread)"
+      : "Main thread (?mode=main)";
+    $("init-status").textContent = `Ready! Proving mode: ${modeLabel}`;
+    renderModeBadge(mode);
 
     await new Promise((r) => setTimeout(r, 600));
     overlay.classList.add("hidden");
